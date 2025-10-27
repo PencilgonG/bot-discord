@@ -1,111 +1,108 @@
 // src/bot/interactions/register.ts
+import { REST, Routes, APIApplicationCommandOptionChoice } from "discord.js";
 
 /**
- * Enregistre /lobby et /profil (set/view) dans le GUILD_DEV_ID.
- * Utilise le token bot pour appeler l'API Discord.
+ * Enregistre UNIQUEMENT :
+ *  - /lobby
+ *  - /profil set
+ *  - /profil view
+ * et retire tout le reste (en écrasant le registre).
  */
 export async function registerSlashCommands(
-  applicationId: string,
-  botToken: string,
-  guildId?: string | null
+  appId: string,
+  token: string,
+  guildId?: string
 ) {
-  if (!botToken) throw new Error("Bot token manquant.");
-  if (!guildId) throw new Error("GUILD_DEV_ID manquant.");
+  const rest = new REST({ version: "10" }).setToken(token);
 
-  const url = `https://discord.com/api/v10/applications/${applicationId}/guilds/${guildId}/commands`;
+  const roleChoices: APIApplicationCommandOptionChoice<string>[] = [
+    { name: "TOP", value: "TOP" },
+    { name: "JUNGLE", value: "JUNGLE" },
+    { name: "MID", value: "MID" },
+    { name: "ADC", value: "ADC" },
+    { name: "SUPPORT", value: "SUPPORT" },
+    { name: "FLEX", value: "FLEX" },
+  ];
 
-  const body = [
-    // /lobby
+  const commands = [
     {
       name: "lobby",
       description: "Créer et gérer un lobby d'inhouse",
       type: 1, // CHAT_INPUT
     },
-    // /profil
     {
       name: "profil",
       description: "Gérer ton profil joueur",
       type: 1,
       options: [
         {
-          type: 1, // SUBCOMMAND
           name: "set",
-          description: "Définir/mettre à jour ton profil",
+          description: "Configurer / mettre à jour ton profil (opgg, dpm, etc.)",
+          type: 1, // SUB_COMMAND
           options: [
             {
-              type: 3, // STRING
               name: "summoner",
-              description: "Pseudo LoL (Nom#Tag)",
+              description: "Nom d'invocateur",
+              type: 3, // STRING
               required: false,
             },
             {
-              type: 3, // STRING
-              name: "mainrole",
-              description: "Rôle principal",
-              required: false,
-              choices: [
-                { name: "TOP", value: "TOP" },
-                { name: "JUNGLE", value: "JUNGLE" },
-                { name: "MID", value: "MID" },
-                { name: "ADC", value: "ADC" },
-                { name: "SUPPORT", value: "SUPPORT" },
-                { name: "FLEX", value: "FLEX" },
-              ],
-            },
-            {
-              type: 3, // STRING
               name: "opgg",
               description: "Lien OP.GG",
+              type: 3,
               required: false,
             },
             {
-              type: 3, // STRING
-              name: "dpm",
-              description: "Lien DPM",
-              required: false,
-            },
-            // 👇 NOUVEAU : region
-            {
-              type: 3, // STRING
               name: "region",
-              description: "Serveur LoL (EUW/EUNE/NA/KR/...)",
+              description: "Région (ex: EUW, EUNE...)",
+              type: 3,
               required: false,
-              choices: [
-                { name: "EUW", value: "EUW" },
-                { name: "EUNE", value: "EUNE" },
-                { name: "NA", value: "NA" },
-                { name: "KR", value: "KR" },
-                { name: "JP", value: "JP" },
-                { name: "OCE", value: "OCE" },
-                { name: "BR", value: "BR" },
-                { name: "LAN", value: "LAN" },
-                { name: "LAS", value: "LAS" },
-                { name: "TR", value: "TR" },
-                { name: "RU", value: "RU" },
-              ],
+            },
+            {
+              name: "role",
+              description: "Rôle principal",
+              type: 3,
+              required: false,
+              choices: roleChoices,
+            },
+            {
+              name: "dpm",
+              description: "Dégâts par minute estimés",
+              type: 4, // INTEGER
+              required: false,
             },
           ],
         },
         {
-          type: 1, // SUBCOMMAND
           name: "view",
-          description: "Afficher ton profil",
+          description: "Afficher un profil",
+          type: 1, // SUB_COMMAND
+          options: [
+            {
+              name: "user",
+              description: "Utilisateur (optionnel, par défaut: toi)",
+              type: 6, // USER
+              required: false,
+            },
+          ],
         },
       ],
     },
   ];
 
-  const resp = await fetch(url, {
-    method: "PUT",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bot ${botToken}`,
-    },
-    body: JSON.stringify(body),
-  });
+  // —————————————————— Enregistrement ——————————————————
+  if (guildId) {
+    // Ecrase les commandes du serveur (supprime les anciennes)
+    await rest.put(Routes.applicationGuildCommands(appId, guildId), {
+      body: commands,
+    });
 
-  if (!resp.ok) {
-    const txt = await resp.text();
-    throw new Error(`Register slash failed: ${resp.status} ${txt}`);
+    // Optionnel mais utile : vider les globales si tu avais déjà publié en global
+    await rest.put(Routes.applicationCommands(appId), { body: [] }).catch(() => {});
+    console.log(`🔧 Slash-commands (guild ${guildId}) mises à jour : /lobby, /profil`);
+  } else {
+    // Pas de GUILD_DEV_ID -> on écrit en global (et on écrase le reste)
+    await rest.put(Routes.applicationCommands(appId), { body: commands });
+    console.log(`🔧 Slash-commands (global) mises à jour : /lobby, /profil`);
   }
 }

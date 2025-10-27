@@ -1,27 +1,51 @@
 // src/bot/commands/profile/view.ts
 import type { ChatInputCommandInteraction } from "discord.js";
+import { MessageFlags } from "discord.js";
 import { prisma } from "../../../infra/prisma.js";
 import { baseEmbed } from "../../../components/embeds.js";
 
+/**
+ * Affiche le profil d'un utilisateur (profil LoL, rôle, région, etc.)
+ */
 export async function handleProfileView(interaction: ChatInputCommandInteraction) {
-  const user = interaction.options.getUser("user") ?? interaction.user;
-  const profile = await prisma.userProfile.findUnique({
-    where: { discordUserId: user.id },
-  });
+  try {
+    // ✅ Étape 1 : on accuse réception immédiatement
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
-  const roleLabel = profile?.preferredRoles?.[0] ?? "—";
-  const summonerLabel =
-    profile?.summonerName && profile?.opggUrl
-      ? `[${profile.summonerName}](${profile.opggUrl})`
-      : (profile?.summonerName ?? "—");
+    // ✅ Étape 2 : on récupère l’utilisateur ciblé (ou celui qui tape la commande)
+    const user = interaction.options.getUser("user") ?? interaction.user;
 
-  const embed = baseEmbed(`Profil de ${user.username}`).addFields(
-    { name: "Utilisateur", value: `<@${user.id}>`, inline: true },
-    { name: "Main role", value: String(roleLabel), inline: true },
-    { name: "Summoner", value: summonerLabel, inline: false },
-    { name: "OP.GG", value: profile?.opggUrl ?? "—", inline: true },
-    { name: "DPM", value: profile?.dpmUrl ?? "—", inline: true },
-  );
+    // ✅ Étape 3 : on tente de récupérer son profil depuis Prisma
+    const profile = await prisma.userProfile.findUnique({
+      where: { discordUserId: user.id },
+    });
 
-  await interaction.reply({ embeds: [embed], ephemeral: true });
+    // ✅ Étape 4 : création de l’embed (avec fallback si profil absent)
+    const embed = baseEmbed(`Profil de ${user.username}`)
+      .setThumbnail(user.displayAvatarURL({ size: 128 }))
+      .addFields(
+        { name: "Summoner", value: profile?.summonerName ?? "—", inline: true },
+        { name: "Rôle principal", value: profile?.preferredRoles?.join(", ") ?? "—", inline: true },
+        { name: "Région", value: profile?.region ?? "—", inline: true },
+        { name: "OP.GG", value: profile?.opggUrl ?? "—", inline: false },
+        { name: "DPM", value: profile?.dpmUrl ?? "—", inline: false }
+      );
+
+    // ✅ Étape 5 : réponse finale
+    await interaction.editReply({ embeds: [embed] });
+  } catch (err) {
+    console.error("Erreur dans handleProfileView:", err);
+
+    // Si l'interaction a déjà expiré, on évite le crash
+    if (interaction.deferred || interaction.replied) {
+      await interaction.editReply({
+        content: "❌ Une erreur est survenue lors de la récupération du profil.",
+      });
+    } else {
+      await interaction.reply({
+        content: "❌ Une erreur est survenue lors de la récupération du profil.",
+        flags: MessageFlags.Ephemeral,
+      });
+    }
+  }
 }

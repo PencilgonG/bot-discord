@@ -1,7 +1,7 @@
 // src/ready.ts
 import { Client, REST, Routes } from 'discord.js';
 import pino from 'pino';
-import { allCommands } from './config/commands.ts';
+import { allCommands } from './config/commands';
 
 const log = pino({ level: process.env.LOG_LEVEL || 'info' });
 

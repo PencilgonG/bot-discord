@@ -1,21 +1,18 @@
-import { z } from 'zod';
+// src/infra/env.ts
+import "dotenv/config";
 
-const EnvSchema = z.object({
-  DISCORD_TOKEN: z.string().min(1),
-  DISCORD_CLIENT_ID: z.string().min(1),
-  DATABASE_URL: z.string().min(1),
-  LOGO_URL: z.string().url().optional(),
-  BANNER_URL: z.string().url().optional(),
-  DEFAULT_CATEGORY_PREFIX: z.string().default('Inhouse -'),
-  DEV_GUILD_ID: z.string().optional()
-});
+export const env = {
+  DISCORD_TOKEN: process.env.DISCORD_TOKEN || "",
+  GUILD_DEV_ID: process.env.GUILD_DEV_ID || "",
 
-export type Env = z.infer<typeof EnvSchema>;
+  DATABASE_URL: process.env.DATABASE_URL || "",
 
-export function getEnv(): Env {
-  const parsed = EnvSchema.safeParse(process.env);
-  if (!parsed.success) {
-    throw new Error('Env invalide: ' + JSON.stringify(parsed.error.issues));
-  }
-  return parsed.data;
-}
+  ORGA_ROLE_ID: process.env.ORGA_ROLE_ID?.trim() || "",
+  ORGA_USER_IDS: (process.env.ORGA_USER_IDS || "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean),
+
+  MATCH_CHANNEL_ID: process.env.MATCH_CHANNEL_ID?.trim() || "",
+  LINEUP_CHANNEL_ID: process.env.LINEUP_CHANNEL_ID?.trim() || "",
+};

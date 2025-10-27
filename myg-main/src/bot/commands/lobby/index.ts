@@ -7,11 +7,11 @@ import {
   onLobbyButton,
   handleLobbySelect,
   handleLobbyModal,
-} from "./wizard.js";
+} from "../../lobby/wizard";
 
 // Profil (/profil set, /profil view)
-import { handleProfileSet } from "../commands/profile/set.js";
-import { handleProfileView } from "../commands/profile/view.js";
+import { handleProfileSet } from "../profile/set";
+import { handleProfileView } from "../profile/view";
 
 /**
  * Routeur des commandes slash.

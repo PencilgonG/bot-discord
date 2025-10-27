@@ -1,74 +1,88 @@
 // src/services/guild.ts
-import type { Guild, CategoryChannel, TextChannel, VoiceChannel } from 'discord.js';
-import { ChannelType, PermissionsBitField } from 'discord.js';
+import {
+  ChannelType,
+  Guild,
+  PermissionFlagsBits,
+  type CategoryChannel,
+  type TextChannel,
+  type VoiceChannel,
+} from "discord.js";
 
-export type TeamResource = {
-  roleId: string;
-  textChannelId: string;
-  voiceChannelId: string;
-};
+/**
+ * Réutilise une catégorie par NOM si elle existe, sinon la crée.
+ * (Pas de persistance DB -> évite l'erreur Prisma et les doublons)
+ */
+export async function ensureLobbyCategoryPersist(
+  guild: Guild,
+  _lobbyId: string,   // gardé pour compat signature, non utilisé
+  name: string
+): Promise<CategoryChannel> {
+  // 1) tenter de retrouver une catégorie existante portant ce nom
+  const found = guild.channels.cache.find(
+    (c) => c.type === ChannelType.GuildCategory && c.name === name
+  ) as CategoryChannel | undefined;
 
-export async function ensureLobbyCategory(guild: Guild, name: string): Promise<CategoryChannel> {
-  const cat = await guild.channels.create({
+  if (found) return found;
+
+  // 2) sinon la créer
+  const category = (await guild.channels.create({
     name,
     type: ChannelType.GuildCategory,
-    permissionOverwrites: [
-      { id: guild.roles.everyone, deny: [PermissionsBitField.Flags.ViewChannel] }
-    ]
-  });
-  return cat as CategoryChannel;
+  })) as CategoryChannel;
+
+  return category;
 }
 
+/** Crée (ou réutilise) rôle + text + voice pour une équipe sous une catégorie (idempotent). */
 export async function ensureTeamResources(
   guild: Guild,
   categoryId: string,
   teamName: string
-): Promise<TeamResource> {
-  const role = await guild.roles.create({ name: teamName, mentionable: true });
+): Promise<{ roleId: string; textChannelId: string; voiceChannelId: string }> {
+  // Rôle
+  const role =
+    guild.roles.cache.find((r) => r.name === teamName) ??
+    (await guild.roles.create({ name: teamName }));
 
-  const text = await guild.channels.create({
-    name: teamName.toLowerCase().replace(/\s+/g, '-'),
-    type: ChannelType.GuildText,
-    parent: categoryId,
-    permissionOverwrites: [
-      { id: guild.roles.everyone, deny: [PermissionsBitField.Flags.ViewChannel] },
-      { id: role.id, allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages] }
-    ]
-  });
+  // Text
+  let text = guild.channels.cache.find(
+    (c) =>
+      c.type === ChannelType.GuildText &&
+      c.parentId === categoryId &&
+      c.name === teamName.toLowerCase().replace(/\s+/g, "-")
+  ) as TextChannel | undefined;
 
-  const voice = await guild.channels.create({
-    name: teamName,
-    type: ChannelType.GuildVoice,
-    parent: categoryId,
-    permissionOverwrites: [
-      { id: guild.roles.everyone, deny: [PermissionsBitField.Flags.Connect, PermissionsBitField.Flags.ViewChannel] },
-      { id: role.id, allow: [PermissionsBitField.Flags.Connect, PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.Speak] }
-    ]
-  });
-
-  return {
-    roleId: role.id,
-    textChannelId: (text as TextChannel).id,
-    voiceChannelId: (voice as VoiceChannel).id
-  };
-}
-
-export async function cleanupLobby(
-  guild: Guild,
-  roleIds: string[],
-  channelIds: string[],
-  categoryId?: string
-) {
-  for (const chId of channelIds) {
-    const ch = guild.channels.cache.get(chId);
-    if (ch) await ch.delete().catch(() => {});
+  if (!text) {
+    text = (await guild.channels.create({
+      name: teamName,
+      type: ChannelType.GuildText,
+      parent: categoryId,
+      permissionOverwrites: [
+        { id: guild.roles.everyone, deny: [PermissionFlagsBits.ViewChannel] },
+        { id: role.id, allow: [PermissionFlagsBits.ViewChannel] },
+      ],
+    })) as TextChannel;
   }
-  for (const roleId of roleIds) {
-    const role = guild.roles.cache.get(roleId);
-    if (role) await role.delete().catch(() => {});
+
+  // Voice
+  let voice = guild.channels.cache.find(
+    (c) =>
+      c.type === ChannelType.GuildVoice &&
+      c.parentId === categoryId &&
+      c.name === teamName
+  ) as VoiceChannel | undefined;
+
+  if (!voice) {
+    voice = (await guild.channels.create({
+      name: teamName,
+      type: ChannelType.GuildVoice,
+      parent: categoryId,
+      permissionOverwrites: [
+        { id: guild.roles.everyone, deny: [PermissionFlagsBits.ViewChannel] },
+        { id: role.id, allow: [PermissionFlagsBits.ViewChannel] },
+      ],
+    })) as VoiceChannel;
   }
-  if (categoryId) {
-    const cat = guild.channels.cache.get(categoryId);
-    if (cat) await cat.delete().catch(() => {});
-  }
+
+  return { roleId: role.id, textChannelId: text.id, voiceChannelId: voice.id };
 }

@@ -26,7 +26,7 @@ export async function execute(interaction: ChatInputCommandInteraction) {
   const redName = interaction.options.getString("red", true);
 
   // Génère les 4 liens (Blue / Red / Spec / Stream)
-  const links = createLolProDraftLinks(blueName, redName);
+  const links = createLolProDraftLinks({ blueName, redName });
 
   const embed = new EmbedBuilder()
     .setTitle(`Draft créée (${links.roomId})`)
@@ -34,7 +34,7 @@ export async function execute(interaction: ChatInputCommandInteraction) {
     .addFields(
       { name: "🔵 Blue", value: links.blue },
       { name: "🔴 Red", value: links.red },
-      { name: "👀 Spectateur", value: links.spec },
+      { name: "👀 Spectateur", value: links.spectate },
       { name: "📺 Stream overlay", value: links.stream }
     )
     .setColor(0x1d4ed8); // bleu Discord

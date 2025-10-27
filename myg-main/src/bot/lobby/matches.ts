@@ -9,6 +9,16 @@ import { row, btn } from "../../components/buttons.js";
 import { createLolProDraftLinks } from "../../services/draft/lolprodraft.js";
 
 /* ------------------------------- Helpers -------------------------------- */
+async function resolveTextChannel(guild: import("discord.js").Guild, id?: string | null) {
+  try {
+    if (!id) return null;
+    const ch = await guild.channels.fetch(id).catch(() => null);
+    if (ch && (ch.isTextBased?.() || (ch as any).isText())) return ch as any;
+    return null;
+  } catch {
+    return null;
+  }
+}
 
 function chunkFirst<T>(arr: T[], n: number): T[] {
   return arr.slice(0, Math.max(0, Math.min(n, arr.length)));
@@ -66,19 +76,21 @@ async function postTeamMessage(
 
 async function postGeneralMessage(
   guild: Guild,
-  generalChannelId: string,
+  _generalChannelId: string, // ignoré maintenant
   matchId: string,
   title: string,
   specUrl: string
 ) {
-  const ch = await fetchTextChannel(guild, generalChannelId);
+  // 🔧 salon match dédié (fixe)
+  const MATCH_CHANNEL_ID = "1432414186209673246";
+  const ch = await fetchTextChannel(guild, MATCH_CHANNEL_ID);
   if (!ch) return;
 
   const embed = baseEmbed(title).addFields({ name: "Spec", value: specUrl });
 
+  // ❌ suppression du bouton "Remake draft"
   const components = row(
-    btn(IDS.match.validate(matchId), "Valider", ButtonStyle.Success),
-    btn(IDS.draft.remake(matchId), "Remake draft"),
+    btn(IDS.match.validate(matchId), "Valider", ButtonStyle.Success)
   );
 
   await ch.send({ embeds: [embed], components: [components] });
@@ -158,6 +170,7 @@ async function prepareAndSendMatch(
     title
   );
 
+  // 🔧 envoie l'embed match dans le salon fixe
   await postGeneralMessage(guild, generalChannelId, match.id, title, match.specUrl!);
 }
 
@@ -229,19 +242,21 @@ async function cleanupLobbyResources(guild: Guild, lobbyId: string) {
     });
   }
 
-  for (const catId of possibleCategoryIds) {
-    try {
-      const cat = await guild.channels.fetch(catId).catch(() => null);
-      if (cat && cat.type === 4 /* GuildCategory */) {
-        const c = cat as unknown as CategoryChannel;
-        // @ts-ignore
-        const children = c.children?.cache ?? (await guild.channels.fetch()).filter(ch => (ch as any).parentId === catId);
-        if (children.size === 0) {
-          await c.delete("Inhouse terminé — catégorie vide").catch(() => {});
+  // 🔧 supprime aussi les embeds "Match — Round" dans le salon match fixe
+  try {
+    const MATCH_CHANNEL_ID = "1432414186209673246";
+    const matchCh = await fetchTextChannel(guild, MATCH_CHANNEL_ID);
+    if (matchCh) {
+      const msgs = await matchCh.messages.fetch({ limit: 50 }).catch(() => null);
+      if (msgs) {
+        for (const m of msgs.values()) {
+          if (m.embeds?.length && m.embeds[0]?.title?.includes("Match")) {
+            await m.delete().catch(() => {});
+          }
         }
       }
-    } catch {}
-  }
+    }
+  } catch {}
 
   await prisma.lobby.update({
     where: { id: lobbyId },
@@ -268,6 +283,22 @@ export async function onMatchValidated(
       content: "❌ match id invalide.",
       flags: MessageFlags.Ephemeral,
     }).catch(() => {});
+  }
+
+  // 👑 Vérification orga obligatoire
+  const member =
+    interaction.guild?.members.cache.get(interaction.user.id) ??
+    (await interaction.guild?.members.fetch(interaction.user.id).catch(() => null));
+
+  const isOrga =
+    (process.env.ORGA_ROLE_ID && member?.roles.cache.has(process.env.ORGA_ROLE_ID)) ||
+    (process.env.ORGA_USER_IDS?.split(",") || []).includes(interaction.user.id);
+
+  if (!isOrga) {
+    return interaction.reply({
+      content: "❌ Seul un **orga** peut valider un match.",
+      flags: MessageFlags.Ephemeral,
+    });
   }
 
   const match = await prisma.match.update({
@@ -329,7 +360,7 @@ export async function onMatchValidated(
 }
 
 /* ------------------------------ Remake draft ------------------------------- */
-
+// (le bouton n'est plus envoyé, mais on laisse la fonction dispo si tu veux l'appeler ailleurs)
 export async function onDraftRemakeButton(
   interaction: ButtonInteraction,
   matchIdFromDispatcher?: string
@@ -410,7 +441,7 @@ export async function onDraftRemakeButton(
 export async function postLineupSummary(
   guild: Guild,
   lobbyId: string,
-  channelId: string
+  _channelId?: string // on ignore maintenant ce paramètre
 ) {
   const lobby = await prisma.lobby.findUniqueOrThrow({
     where: { id: lobbyId },
@@ -453,6 +484,8 @@ export async function postLineupSummary(
 
   embed.addFields({ name: "Planning", value: scheduleLines || "—", inline: false });
 
-  const ch = await fetchTextChannel(guild, channelId);
+  // 🔧 Envoi forcé dans le salon LINE-UP fixe
+  const LINEUP_CHANNEL_ID = "1432414261572931705";
+  const ch = await fetchTextChannel(guild, LINEUP_CHANNEL_ID);
   if (ch) await ch.send({ embeds: [embed] });
 }

@@ -7,6 +7,7 @@ import type {
   ChatInputCommandInteraction,
 } from "discord.js";
 import { ButtonStyle, MessageFlags } from "discord.js";
+
 import { prisma } from "../../infra/prisma.js";
 import { IDS } from "../interactions/ids.js";
 import { modalLobbyConfig } from "../../components/modals.js";
@@ -27,9 +28,10 @@ import {
   postLineupSummary,
 } from "./matches.js";
 import {
-  ensureLobbyCategory,
+  ensureLobbyCategoryPersist,
   ensureTeamResources,
 } from "../../services/guild.js";
+
 
 /* ───────────────────────────── helpers ───────────────────────────── */
 
@@ -70,6 +72,56 @@ async function acknowledgeAndEdit(
   } catch {}
 }
 
+// ───────────────────────── guard: orga only ─────────────────────────
+async function requireOrganizer(interaction: ButtonInteraction): Promise<boolean> {
+  try {
+    const member =
+      interaction.guild?.members.cache.get(interaction.user.id) ??
+      (await interaction.guild?.members.fetch(interaction.user.id).catch(() => null));
+
+    const isWhitelisted =
+      (process.env.ORGA_USER_IDS?.split(",") || []).map((s) => s.trim()).filter(Boolean)
+        .includes(interaction.user.id);
+
+    const hasRole =
+      !!process.env.ORGA_ROLE_ID && !!member?.roles.cache.has(process.env.ORGA_ROLE_ID);
+
+    if (isWhitelisted || hasRole) return true;
+
+    await interaction.reply({
+      content: "❌ Cette action est réservée aux **organisateurs**.",
+      flags: MessageFlags.Ephemeral,
+    });
+    return false;
+  } catch {
+    try {
+      await interaction.reply({
+        content: "❌ Impossible de vérifier tes permissions (orga only).",
+        flags: MessageFlags.Ephemeral,
+      });
+    } catch {}
+    return false;
+  }
+}
+
+// ───────────────────────── guard: lobby must exist ─────────────────────────
+async function getLobbyOrWarn(
+  interaction: ButtonInteraction,
+  lobbyId: string
+) {
+  const lobby = await prisma.lobby.findUnique({ where: { id: lobbyId } });
+  if (!lobby) {
+    try {
+      await interaction.reply({
+        content: "❌ Ce lobby n’existe plus (supprimé ou expiré). Relance `/lobby`.",
+        flags: MessageFlags.Ephemeral,
+      });
+    } catch {}
+    return null;
+  }
+  return lobby;
+}
+
 // formateur d’une ligne joueur : "<@user> — [Summoner](opgg)"
 function formatParticipantLine(p: {
   userId: string;
@@ -79,7 +131,7 @@ function formatParticipantLine(p: {
   const sum =
     p.profile?.summonerName && p.profile?.opggUrl
       ? `[${p.profile.summonerName}](${p.profile.opggUrl})`
-      : (p.profile?.summonerName ?? null);
+      : p.profile?.summonerName ?? null;
   return sum ? `${who} — ${sum}` : who;
 }
 
@@ -97,13 +149,19 @@ function waitingRoomButtons(lobbyId: string) {
     btn(`wait:join:role:${RoleName.FLEX}:${lobbyId}`, "FLEX"),
     btn(`wait:join:sub:${lobbyId}`, "S’inscrire en SUB", ButtonStyle.Secondary),
     btn(`wait:leave:${lobbyId}`, "Se désinscrire", ButtonStyle.Danger),
+    // ⬇️ ce bouton ouvre directement le pick même si vous êtes 1 ou 2
     btn(`wait:pick:${lobbyId}`, "Pick teams", ButtonStyle.Success)
   );
   return [r1, r2];
 }
 
+
 async function renderWaitingRoomEmbed(lobbyId: string) {
-  const lobby = await prisma.lobby.findUniqueOrThrow({ where: { id: lobbyId } });
+  const lobby = await prisma.lobby.findUnique({ where: { id: lobbyId } });
+  if (!lobby) {
+    return baseEmbed("Salle d’attente", "⚠️ Lobby introuvable (supprimé).");
+  }
+
   const participants = await prisma.lobbyParticipant.findMany({
     where: { lobbyId },
     include: { profile: true },
@@ -184,7 +242,6 @@ async function signupAsSub(userId: string, lobbyId: string) {
 async function leaveWaitingRoom(userId: string, lobbyId: string) {
   await prisma.lobbyParticipant.deleteMany({ where: { lobbyId, userId } });
 }
-
 /* ─────────────────────────── slash / lobby ─────────────────────────── */
 
 export async function handleSlashLobby(
@@ -213,7 +270,7 @@ export async function handleSlashLobby(
   });
 
   await (interaction.editReply as any)({
-    embeds: [lobbyEmbed(lobby)],
+    embeds: [lobbyEmbed(lobby as any)],
     components: [controlsRow(lobby.id)],
   });
 }
@@ -231,8 +288,11 @@ export async function onLobbyButton(interaction: ButtonInteraction) {
   }
 
   if (id.startsWith("lobby:test:")) {
+    if (!(await requireOrganizer(interaction))) return;
     const lobbyId = id.split(":")[2];
-    const lobby = await prisma.lobby.findUniqueOrThrow({ where: { id: lobbyId } });
+    const lobby = await getLobbyOrWarn(interaction, lobbyId);
+    if (!lobby) return;
+
     for (let i = 0; i < lobby.slots * 5; i++) {
       const uid = `${interaction.user.id}-${i + 1}`;
       await prisma.userProfile.upsert({
@@ -258,32 +318,44 @@ export async function onLobbyButton(interaction: ButtonInteraction) {
 
   if (id.startsWith("lobby:validate:")) {
     const lobbyId = id.split(":")[2];
+    if (!(await getLobbyOrWarn(interaction, lobbyId))) return;
     return showWaitingRoom(interaction, lobbyId);
   }
 
   if (id.startsWith("pick:page:")) {
+    if (!(await requireOrganizer(interaction))) return;
     const [, , lobbyId, teamNo] = id.split(":");
+    if (!(await getLobbyOrWarn(interaction, lobbyId))) return;
     return openPick(interaction, lobbyId, Number(teamNo));
   }
   if (id.startsWith("pick:prev:")) {
+    if (!(await requireOrganizer(interaction))) return;
     const [, , lobbyId, teamNo] = id.split(":");
+    if (!(await getLobbyOrWarn(interaction, lobbyId))) return;
     return openPick(interaction, lobbyId, Math.max(1, Number(teamNo) - 1));
   }
   if (id.startsWith("pick:next:")) {
+    if (!(await requireOrganizer(interaction))) return;
     const [, , lobbyId, teamNo] = id.split(":");
+    if (!(await getLobbyOrWarn(interaction, lobbyId))) return;
     return openPick(interaction, lobbyId, Number(teamNo) + 1);
   }
   if (id.startsWith("pick:validate:")) {
+    if (!(await requireOrganizer(interaction))) return;
     const lobbyId = id.split(":")[2];
+    if (!(await getLobbyOrWarn(interaction, lobbyId))) return;
     return validateTeams(interaction, lobbyId);
   }
   if (id.startsWith("pick:schedule:")) {
+    if (!(await requireOrganizer(interaction))) return;
     const lobbyId = id.split(":")[2];
+    if (!(await getLobbyOrWarn(interaction, lobbyId))) return;
     return showPlanningPicker(interaction, lobbyId);
   }
 
   if (id.startsWith("wait:join:role:")) {
     const [, , , roleStr, lobbyId] = id.split(":");
+    if (!(await getLobbyOrWarn(interaction, lobbyId))) return;
     const role = roleStr as RoleName;
     await signupForRole(interaction.user.id, lobbyId, role);
     const embed = await renderWaitingRoomEmbed(lobbyId);
@@ -293,6 +365,7 @@ export async function onLobbyButton(interaction: ButtonInteraction) {
   }
   if (id.startsWith("wait:join:sub:")) {
     const lobbyId = id.split(":")[3];
+    if (!(await getLobbyOrWarn(interaction, lobbyId))) return;
     await signupAsSub(interaction.user.id, lobbyId);
     const embed = await renderWaitingRoomEmbed(lobbyId);
     const components = waitingRoomButtons(lobbyId);
@@ -301,6 +374,7 @@ export async function onLobbyButton(interaction: ButtonInteraction) {
   }
   if (id.startsWith("wait:leave:")) {
     const lobbyId = id.split(":")[2];
+    if (!(await getLobbyOrWarn(interaction, lobbyId))) return;
     await leaveWaitingRoom(interaction.user.id, lobbyId);
     const embed = await renderWaitingRoomEmbed(lobbyId);
     const components = waitingRoomButtons(lobbyId);
@@ -308,7 +382,9 @@ export async function onLobbyButton(interaction: ButtonInteraction) {
     return (interaction.message as any).edit({ embeds: [embed], components });
   }
   if (id.startsWith("wait:pick:")) {
+    if (!(await requireOrganizer(interaction))) return;
     const lobbyId = id.split(":")[2];
+    if (!(await getLobbyOrWarn(interaction, lobbyId))) return;
     return openPick(interaction, lobbyId, 1);
   }
 
@@ -331,6 +407,11 @@ export async function handleLobbySelect(
     const [, , lobbyId, teamNo] = id.split(":");
     const userId = interaction.values[0];
 
+    const lobby = await prisma.lobby.findUnique({ where: { id: lobbyId } });
+    if (!lobby) {
+      return interaction.update({ content: "⚠️ Lobby supprimé.", components: [], embeds: [] });
+    }
+
     await prisma.lobbyParticipant.updateMany({
       where: { lobbyId, teamNumber: Number(teamNo), isCaptain: true },
       data: { isCaptain: false },
@@ -352,6 +433,11 @@ export async function handleLobbySelect(
   if (id.startsWith("select:players:")) {
     const [, , lobbyId, teamNo] = id.split(":");
     const members = interaction.values;
+
+    const lobby = await prisma.lobby.findUnique({ where: { id: lobbyId } });
+    if (!lobby) {
+      return interaction.update({ content: "⚠️ Lobby supprimé.", components: [], embeds: [] });
+    }
 
     await prisma.lobbyParticipant.updateMany({
       where: { lobbyId, teamNumber: Number(teamNo) },
@@ -376,7 +462,12 @@ export async function handleLobbySelect(
   if (id.startsWith("select:planning:")) {
     const lobbyId = id.split(":")[2];
     const choice = interaction.values[0];
-    const lobby = await prisma.lobby.findUniqueOrThrow({ where: { id: lobbyId } });
+
+    const lobby = await prisma.lobby.findUnique({ where: { id: lobbyId } });
+    if (!lobby) {
+      return interaction.update({ content: "⚠️ Lobby supprimé.", components: [], embeds: [] });
+    }
+
     const schedule = buildScheduleFromChoice(lobby.slots, choice);
 
     await prisma.match.deleteMany({ where: { lobbyId } });
@@ -414,7 +505,6 @@ export async function handleLobbySelect(
     });
   }
 }
-
 /* ───────────────────────── modal handlers ───────────────────────── */
 
 export async function handleLobbyModal(interaction: ModalSubmitInteraction) {
@@ -423,7 +513,13 @@ export async function handleLobbyModal(interaction: ModalSubmitInteraction) {
   if (id.startsWith("modal:schedule:")) {
     const lobbyId = id.split(":")[2];
     const format = interaction.fields.getTextInputValue("format");
-    const lobby = await prisma.lobby.findUniqueOrThrow({ where: { id: lobbyId } });
+    const lobby = await prisma.lobby.findUnique({ where: { id: lobbyId } });
+    if (!lobby) {
+      return interaction.reply({
+        content: "❌ Lobby supprimé.",
+        flags: MessageFlags.Ephemeral,
+      });
+    }
 
     const schedule = parseScheduleFormat(format, lobby.slots);
     if (!schedule.length)
@@ -472,13 +568,22 @@ export async function handleLobbyModal(interaction: ModalSubmitInteraction) {
     const slots = Number(interaction.fields.getTextInputValue("slots") || "2");
     const mode = toGameMode(interaction.fields.getTextInputValue("mode"));
 
+    const lobby = await prisma.lobby.findUnique({ where: { id: lobbyId } });
+    if (!lobby) {
+      return interaction.reply({
+        content: "❌ Lobby supprimé.",
+        flags: MessageFlags.Ephemeral,
+      });
+    }
+
     await prisma.lobby.update({
       where: { id: lobbyId },
       data: { name, slots, mode },
     });
 
-    const lobby = await prisma.lobby.findUniqueOrThrow({ where: { id: lobbyId } });
-    const ch = (await interaction.client.channels.fetch(lobby.channelId).catch(() => null)) as any;
+    const ch = (await interaction.client.channels
+      .fetch(lobby.channelId)
+      .catch(() => null)) as any;
     if (ch?.isTextBased?.()) {
       const msg = await ch.messages.fetch(lobby.messageId!).catch(() => null);
       if (msg)
@@ -527,7 +632,7 @@ async function buildPickPayload(
     include: { profile: true },
     orderBy: { userId: "asc" },
   });
-  const rosterSize = rosterSizeFor(lobby.mode);
+  const rosterSize = rosterSizeFor(lobby.mode as any);
 
   const currentMembers = participants.filter((p) => p.teamNumber === teamNo);
   const captain = currentMembers.find((p) => p.isCaptain);
@@ -666,37 +771,59 @@ function buildScheduleFromChoice(
 
 /* ────────────────────── validation & round 1 send ───────────────────── */
 
+// ────────────────────── validation & round 1 send ─────────────────────
 async function validateTeams(
   interaction: ButtonInteraction,
   lobbyId: string
 ) {
+  // Aucune vérification de quota ici : on valide quoi qu'il arrive
   const lobby = await prisma.lobby.findUniqueOrThrow({ where: { id: lobbyId } });
-  const category = await ensureLobbyCategory(interaction.guild!, `${lobby.name}`);
 
+  // Crée/assure la catégorie de lobby
+  // AVANT
+// const category = await ensureLobbyCategory(interaction.guild!, `${lobby.name}`);
+
+// APRÈS
+const category = await ensureLobbyCategoryPersist(
+  interaction.guild!,
+  lobby.id,
+  lobby.name
+);
+
+  // Pour chaque équipe existante dans la DB, on s'assure du rôle + salons
   for (let n = 1; n <= lobby.slots; n++) {
-    const team = await prisma.team.findUniqueOrThrow({
-      where: { lobbyId_number: { lobbyId, number: n } },
-    });
+  const team = await prisma.team.findUniqueOrThrow({
+    where: { lobbyId_number: { lobbyId, number: n } },
+  });
 
-    const res = await ensureTeamResources(
-      interaction.guild!,
-      category.id,
-      team.name
-    );
-
-    await prisma.team.update({
-      where: { id: team.id },
-      data: {
-        roleId: res.roleId,
-        textChannelId: res.textChannelId,
-        voiceChannelId: res.voiceChannelId,
-      },
-    });
+  // Si déjà câblé ET toujours existant sur Discord → on saute
+  const hasAll = team.roleId && team.textChannelId && team.voiceChannelId;
+  if (hasAll) {
+    const [roleOk, textOk, voiceOk] = await Promise.all([
+      interaction.guild!.roles.fetch(team.roleId!).then(Boolean).catch(() => false),
+      interaction.guild!.channels.fetch(team.textChannelId!).then(Boolean).catch(() => false),
+      interaction.guild!.channels.fetch(team.voiceChannelId!).then(Boolean).catch(() => false),
+    ]);
+    if (roleOk && textOk && voiceOk) continue;
   }
 
+  const res = await ensureTeamResources(interaction.guild!, category.id, team.name);
+
+  await prisma.team.update({
+    where: { id: team.id },
+    data: {
+      roleId: res.roleId,
+      textChannelId: res.textChannelId,
+      voiceChannelId: res.voiceChannelId,
+    },
+  });
+}
+
+  // S'il n'y a pas encore de matchs du round 0 définis → demander le planning
   const matchesCount = await prisma.match.count({
     where: { lobbyId, round: 0 },
   });
+
   if (matchesCount === 0) {
     return interaction.reply({
       content:
@@ -705,12 +832,13 @@ async function validateTeams(
     });
   }
 
-  await acknowledgeAndEdit(interaction, {
+  // Sinon : on envoie les premiers matchs + lineup et on passe l'état en RUNNING
+  await (interaction.message as any).edit({
     content:
       "✅ Équipes validées, envoi des **premiers matchs** dans les salons. Les capitaines cliqueront **Valider** à la fin.",
     embeds: [],
     components: [],
-  });
+  }).catch(() => {});
 
   await sendRoundMatches(interaction.guild!, lobbyId, 0, lobby.channelId);
   await postLineupSummary(interaction.guild!, lobbyId, lobby.channelId);
